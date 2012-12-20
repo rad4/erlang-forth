@@ -13,7 +13,15 @@ Alex
 length is therefore output is 
 
 
+
 */
+
+
+/* TODO
+
+erlang tonyg serial
+
+ */
 
 #include <stdio.h>
 #include <termios.h>
@@ -62,7 +70,7 @@ int read_stdin(byte *buff, int length)
 
 {
   int x = 0;
-  int recvd = 0; /* accumulator for received bytes */
+  int recvd = 0; /* accumulator to count received bytes */
   do
     {
       x = read(stdinfd, buff+recvd, length);
