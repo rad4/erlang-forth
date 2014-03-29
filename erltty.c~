@@ -1,0 +1,509 @@
+/* Debugging - 
+
+Erlang takes over stdout
+
+Stderr is redirected to erlerr.txt with freopen().  Setup second terminal
+and run tail -f erlerr.txt to watch debug messages.
+
+Named pipe 'erlpipe' is setup to watch actual transactions between erlang and serial port.
+
+write_serial() and write_erlang() will echo to erlpipe if -pipe flag is set
+
+
+Notes
+
+read and write will read up to the number of bytes requested.  Does not guarantee this number of bytes are read/written.  This is why write_exact read_exact are written.
+*/
+
+#include <stdio.h>
+#include <termios.h>
+#include <unistd.h>
+#include <string.h> 
+#include "dbg.h"
+#include <fcntl.h>
+#include <stdlib.h>
+
+#define NULLFDS   ((fd_set *) 0)
+#define NULLTV    ((struct timeval *) 0)
+#define ERLPIPE "erlpipe"
+#define ERLPIPEIN "erlpipein"
+#define MAXMESG 1026
+#define HEADERBYTES 2
+typedef enum {TRUE = 1, FALSE=0} bool;
+typedef unsigned char byte;
+struct erlangmesg { int len; byte mesg[MAXMESG];} ; // holds length and body of erlangmessage
+  
+// setup globals
+
+//serial port string name
+char serialport[50] = "/dev/ttyUSB0";
+int baudrate=57600;  //global  baudrate for command line storage
+bool pipedebug = FALSE;
+bool erlang = TRUE;
+bool serial = TRUE;
+
+//function protoytypes
+int parsecmdargs(int argc, char *argv[]);
+speed_t getbaud(int baudrate);
+int makeraw(int fd);
+int makepipe(char* pipename);
+int saveterminal(int fd, struct termios termconfig);
+int restoreterminal(int fd, struct termios termconfig);
+int serialfd, stdinfd, stdoutfd, erlpipefd, erlpipeinfd;
+
+struct erlangmesg erlmesg;
+int main(int argc, char *argv[])
+
+{
+  speed_t baud = B57600;  // default baudrate
+  stdinfd = fileno(stdin);
+  stdoutfd = fileno(stdout);
+  serialfd = -1;
+  erlpipefd = -1;
+  struct termios oldserial, oldstdin;
+ 
+ 
+ //saveterminal(stdinfd,oldstdin);
+ // check(tcgetattr(stdinfd,&oldstdin) == 0, "Failed to backup stdin");
+
+ // if erlang mode is set then redirect stderr to erlerr.txt
+
+   
+
+  //read command line arguments
+  check(parsecmdargs(argc, argv) != -1,"Command Line Argument Failure");
+
+
+  if(erlang == TRUE)
+     {
+       freopen("erlerr.txt", "w", stderr);
+     }  
+ debug("pid is %d", getpid());
+  //setup pipe if require doesn't work yet 
+   if(pipedebug == 1) //
+   {
+  
+     check(makepipe(ERLPIPE) == 0, "Pipe creation or opening failed for: ");
+     debug("Pipe created:");
+     debug("Process %d opening erlpipe", getpid());
+     erlpipefd = open(ERLPIPE, O_WRONLY|O_NONBLOCK); 
+     check(erlpipefd > 0, "Erlpipe failed to open pipe: %s\nSetup reader in second terminal\n tail -f erlpipe",ERLPIPE);
+     debug("Erlpipe opened");
+     /*
+     check(makepipe(ERLPIPEIN) == 0, "Erlpipein  creation or opening failed for: "); 
+     debug("Pipe created:");
+     debug("Process %d opening erlpipein", getpid());
+     erlpipeinfd = open(ERLPIPEIN);
+     check(erlpipeinfd > 0, "Erlpipein: Failed to open pipe: %s\nSetup reader in second terminal\n tail -f erlpipe",ERLPIPEIN);
+     debug("Erlpipe opened"); */
+    }
+    
+   // save terminal settings
+ 
+ 
+  //get baud rate from command line arguments
+  baud = getbaud(baudrate);
+  check(baud != B0, "Illegal baud rate"); 
+  
+  if(serial == TRUE){
+
+  //open serial port
+  serialfd = open(serialport, O_RDWR);
+  check(serialfd > 0,"Can't open serial port\n Try dmesg | grep tty from shell \n");    
+  debug("Opened serial port: %s",serialport);
+ 
+  //set serial port to raw mode
+  check(makeraw(serialfd)==0,"Failed to set serial port raw mode");
+ //set baudrate serial
+  check(setspeed(serialfd,baud)==0,"Failed to set baud rate");
+  debug("Baud rate set to: %d", baudrate);
+  }
+
+  //set stdin to raw mode
+  // check(makeraw(stdinfd)==0, "Failed to set stdin to raw mode");
+  // debug("Not Entered raw mode:");
+
+ 
+  
+  //send acknowledge to erlang???
+
+ /* Watch stdinfd and serialfd
+       if input is available process then output
+       Serial -> Erlang
+       Erlang -> Serial
+    */ 
+  
+  /*
+  int numbytes;
+  while(1){
+  numbytes = read_erlang(erlmesg.mesg);
+  check(numbytes > 0, "Read error from erlang");
+	debug("Read %d bytes from Erlang", numbytes);
+	write_serial(numbytes, erlmesg.mesg);
+	debug("Wrote %d bytes to serial:", numbytes);
+  }
+  //main loop
+  */
+	
+  {
+    fd_set readfds;
+    int maxfd;
+    int is, numbytes;
+    FD_ZERO(&readfds);
+    
+    maxfd = (stdinfd > serialfd) ? stdinfd : serialfd;
+    maxfd = (maxfd > erlpipeinfd) ? maxfd : erlpipeinfd;
+
+      
+    while(1){
+      if(serial){
+      FD_SET(serialfd, &readfds);
+      }
+      
+      if(pipedebug){
+	  FD_SET(erlpipeinfd, &readfds);
+	}
+
+      FD_SET(stdinfd, &readfds);
+      
+      
+      is = select(maxfd+1, &readfds, NULLFDS, NULLFDS, NULLTV);
+      check(is>0,"Select error -"); 
+      
+      if (serial && FD_ISSET(serialfd,&readfds)){ // Serial porth ready to read
+	FD_CLR(serialfd,&readfds);
+	
+
+	numbytes = read(serialfd, erlmesg.mesg, MAXMESG);
+	check(numbytes > 0, "Read error from serial port");
+	write_erlang(numbytes, erlmesg.mesg);
+
+      }
+
+      if (FD_ISSET(stdinfd,&readfds)){  //Stdin-Erlang ready to read
+ 	FD_CLR(stdinfd, &readfds);
+	
+        numbytes = read_erlang(erlmesg.mesg);
+	check(numbytes > 0, "Read error from erlang");
+	debug("Read %d bytes from Erlang", numbytes);
+	write_serial(numbytes, erlmesg.mesg);
+	debug("Wrote %d bytes to serial:", numbytes);
+
+      }
+      // input pipe
+      /*
+      if (pipedebug && (FD_ISSET(erlpipeinfd,&readfds)){  
+	FD_CLR(erlpipeinfd, &readfds);
+
+    }
+      */
+    }
+  
+}	  
+  //hanldle input from erlang
+  //handle input from serial port
+  // restoreterminal(stdinfd,&oldstdin);
+
+	//  tcsetattr(stdinfd,TCSANOW,&oldstdin);
+    return 0;
+
+ error:
+    //restoreterminal(stdinfd,&oldstdin);
+    //    tcsetattr(stdinfd,TCSANOW,&oldstdin);;
+    debug("Restored terminal");
+    exit(1);
+   
+    }
+
+
+/* Parse command line argumenments -argv[0] is program name
+
+-ttyport /usb0tt sets up name of comport
+-baud 57600 sets baudrate to 57600
+*/
+int parsecmdargs(int argc, char *argv[])
+{
+  int i;
+  //baudrate;
+ 
+  for(i=1; i<argc; i++)
+    {
+      // baud rate check
+      if (strcmp(argv[i],"-baud") == 0)  // check if -baud argument has been set
+	{
+	  i++;  // next argument should be valid baudrate
+	  check((i < argc),"No baud rate given in arguments")     // check we still have arguments
+	   
+	     baudrate = atoi(argv[i]); //
+	  // debug("baud rate: %d",baudrate);
+	   
+	}
+
+
+  if (strcmp(argv[i],"-ttyport") == 0) // check if -ttyport argument has been set
+    {
+      i++;
+      check((i<argc),"No ttyport given in arguments");
+      strcpy(serialport,argv[i]);
+      //debug("Serial port set to: %s",argv[i]);
+    }
+
+  if (strcmp(argv[i],"-pipe") == 0) // check if pipe setup requested
+    {
+      pipedebug = TRUE;
+     }
+  if (strcmp(argv[i],"-noerlang") == 0) // check if pipe setup requested
+    {
+      erlang = FALSE;
+     }
+
+  if (strcmp(argv[i],"-noserial") == 0) // check if serial port is turned off 
+    {
+      serial = FALSE;
+    }
+		  
+    }
+  return 1;
+error:
+	  return -1;
+	     
+    }	
+
+
+/* return baudrate in termios format speed_t given an appropriate integer
+
+ */	      
+	      
+speed_t getbaud(int baudrate)
+{
+  speed_t brate;
+   switch(baudrate) {
+    case 4800:   return B4800;   break;
+    case 9600:   return B9600;   break;
+#ifdef B14400
+    case 14400:  return B14400;  break;
+#endif
+    case 19200:  return B19200;  break;
+#ifdef B28800
+    case 28800:  return B28800;  break;
+#endif
+    case 38400:  return B38400;  break;
+    case 57600:  return B57600;  break;
+    case 115200: return B115200; break;
+    }
+   return B0;
+}
+
+/*
+configure serial port or stdin for raw mode
+*/
+int saveterminal(int fd, struct termios termconfig)
+{
+   
+   check(tcgetattr(fd,&termconfig) >= 0, "No attributes retrived for this terminal");
+   return 0;
+ error:
+   return -1;
+}
+
+int restoreterminal(int fd, struct termios termconfig)
+{
+   
+  check(tcsetattr(fd,TCSANOW,&termconfig) >= 0, "No attributes retrived for this terminal");
+  return 0;
+ error:
+   return -1;
+}
+
+
+
+int makeraw(int fd)
+{
+  struct termios termconfig;
+ 
+  // Get configuration
+  check(tcgetattr(fd,&termconfig) == 0, "No attributes retrived for this terminal");
+  
+  /* Configure for raw mode (see man termios) */
+  termconfig.c_cc[VMIN] = 1;         /* at least one character */
+  termconfig.c_cc[VTIME] = 0;        /* do not wait to fill buffer */
+
+  termconfig.c_iflag &= ~(ICRNL |    /* disable CR-to-NL mapping */
+			INLCR |    /* disable NL-to-CR mapping */
+			IGNCR |    /* disable ignore CR */
+			ISTRIP |   /* disable stripping of eighth bit */
+			IXON |     /* disable output flow control */
+			BRKINT |   /* disable generate SIGINT on brk */
+			IGNPAR |
+			PARMRK |
+			IGNBRK |
+			INPCK);    /* disable input parity detection */
+
+  termconfig.c_lflag &= ~(ICANON |   /* enable non-canonical mode */
+			ECHO |     /* disable character echo */
+			ECHOE |    /* disable visual erase */
+			ECHOK |    /* disable echo newline after kill */
+			ECHOKE |   /* disable visual kill with bs-sp-bs */
+			ECHONL |   /* disable echo nl when echo off */
+			ISIG | 	   /* disable tty-generated signals */
+			IEXTEN);   /* disable extended input processing */
+  
+  termconfig.c_cflag |= CS8;         /* enable eight bit chars */
+  termconfig.c_cflag &= ~PARENB;     /* disable input parity check */
+
+  termconfig.c_oflag &= ~OPOST;      /* disable output processing */
+  termconfig.c_cflag |= CLOCAL;
+  check(tcsetattr(fd, TCSANOW, &termconfig) >= 0, "Failed setting attributes for terminal");
+
+  return 0;
+ error:
+  return -1;
+
+}
+
+int setspeed(int fd, speed_t newbaud)
+{
+  struct termios termconfig;
+
+  check(tcgetattr(fd,&termconfig) >= 0, "No attributes retrived for this terminal");
+  termconfig.c_cflag=CS8|CREAD|CLOCAL; 
+  
+  check(cfsetispeed(&termconfig, newbaud) == 0, "Failed setting input speed");
+  check(cfsetospeed(&termconfig, newbaud) == 0, "Failed setting output speed");
+  check(tcsetattr(fd, TCSAFLUSH, &termconfig) >= 0, "Failed setting attributes for terminal");
+
+  return 0;
+ error:
+  return -1;
+    }
+
+int makepipe(char* pipename)
+{
+  int fifores;
+   if (access(pipename, F_OK) == -1){
+    fifores = mkfifo(pipename, 0660);
+    check(fifores == 0, "Could not create Pipe %s", pipename);
+    
+   }
+   
+   return 0;
+ error:
+   return -1;
+}
+
+
+/************ ERLANG COMM SECTION **************
+Read and write routine for stdin stdout
+Erlang sends a two byte header with each message
+Read two bytes convert to length.  Read remaing bytess
+
+*/
+
+
+int read_exact(int fd, byte *buff, int length)
+/* read until we get length requested,
+   allows for fragmented reads */
+
+{
+  int x = 0;
+  int recvd = 0; /* accumulator to count received bytes */
+  int len = length;
+  do
+    {
+      x = read(fd, buff+recvd, len);
+      check(x > 0, "Read error - Stream close?")
+      recvd += x;
+      len +- recvd;
+    } while (recvd < length);
+      return length;
+ error:
+      return x;
+}
+
+int write_exact(int fd, byte *buff, int length)
+{
+  int x=0, sent =0, len=length;
+  do
+    {
+      x= write(fd, buff+sent, len);
+      check(x > 0, "Write error - Stread closed?");
+      sent += x;
+      len +- sent;
+    } while (sent < length);
+      return length;
+ error:
+      return x;
+}
+
+int read_erlang(byte *buff)
+{
+  /* 1. read first two btyes from erlang which contain lenths bytes using
+     read_stdin;  MSB first
+     2. extract length 
+     3. read this number of bytes from stdin using read_stdin
+
+  */
+  int len; /* hold result of converting length bytes */
+
+  check((read_exact(stdinfd,buff,2) == 2), "Error reading message header");
+  
+  len = get_16bit(buff);
+  
+  check((read_exact(stdinfd,buff,len) == len), "Error reading message body:");
+   
+  // mesglen = len;
+  return len;
+
+ error:
+  return -1;
+}
+
+int get_16bit(byte *buff)  
+{
+  return (buff[0] << 8) | buff[1];
+}
+
+
+void put_16bit(int i, byte *buff)
+{
+  buff[0] = (byte) ((i >> 8) & 0xff);
+  buff[1] = (byte) (i & 0xff);
+  return;
+} 
+// write to serial port and pipe if defined
+
+
+
+//write to erlang and pipe if defined
+int write_serial(int len, byte *buff)
+{
+  
+
+   if(pipedebug == TRUE)
+    {
+      write_exact(erlpipefd, "Serial: ",8);
+      write_exact(erlpipefd, buff, len);
+      write(erlpipefd,"\n",1);
+    }
+   
+   if(serial == TRUE){
+   return write_exact(serialfd, buff, len);
+   }
+
+   return 0;
+	      }
+
+int write_erlang(int mesglen, byte *buff)
+{
+  byte header[HEADERBYTES];
+  put_16bit(mesglen, header);
+  write_exact(stdoutfd, header, HEADERBYTES);
+  write_exact(stdoutfd, buff, mesglen);
+  if(pipedebug == TRUE)
+    {
+      write(erlpipefd, "Erlang: ", 8);
+      write_exact(erlpipefd, buff, mesglen);
+      write(erlpipefd, "\n", 1);
+    }
+  return mesglen;
+}

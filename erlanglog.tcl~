@@ -1,0 +1,24 @@
+package require Tk
+
+
+
+wm title . "Erlang Logger"
+
+text .log -state disabled -width 80 -height 24 -wrap none 
+frame .f
+button .b -text "Hello"
+
+grid .log -column 0 -row 0 -columnspan 4 -rowspan 4
+grid .f -column 1 -row 0
+grid .f.b -column 0 -row 0
+
+puts "cat"
+
+proc writeToLog {msg} {
+    set numlines [lindex [split [.log index "end - 1 line"] "."] 0]
+    .log configure -state normal
+    if {$numlines==40} {.log delete 1.0 2.0}
+    if {[.log index "end-1c"]!="1.0"} {.log insert end "\n"}
+    .log insert end "$msg"
+    .log configure -state disabled
+}
